@@ -351,10 +351,18 @@ function zoomTo(node, animate = true) {
     pathsMerged.style('opacity', 1).attr('d', d => arc(d.target)).attr('fill', d => nodeColour(d)).each(function(d) { this._current = d.target; });
   }
 
+  // Only show labels on nodes that are at most 2 levels deeper than the focus
+  // This prevents thin outer-ring wedges from getting labels when zoomed in
+  const focusDepth = focus.depth;
   const labelables = showableNodes.filter(d => {
     const angle = d.target.x1 - d.target.x0;
     const radius = (d.target.y0 + d.target.y1) / 2;
-    return angle * radius > 30 && angle > 0.06;
+    const arcLength = angle * radius;
+    const bandHeight = d.target.y1 - d.target.y0;
+    // Depth gate: only label nodes within 2 levels of focus
+    if (d.depth > focusDepth + 2) return false;
+    // Size gate: need enough physical space
+    return arcLength > 40 && angle > 0.08 && bandHeight > 11;
   });
 
   const labels = labelGroup.selectAll('text').data(labelables, d => d.data.n + '|' + d.depth + '|' + (d.parent ? d.parent.data.n : ''));
@@ -373,18 +381,60 @@ function zoomTo(node, animate = true) {
   function labelText(d) {
     const angle = d.target.x1 - d.target.x0;
     const radius = (d.target.y0 + d.target.y1) / 2;
+    const bandHeight = d.target.y1 - d.target.y0;
     const arcLength = angle * radius;
-    const maxChars = Math.floor(arcLength / 6.5);
+
+    // Text is rotated so it runs radially (along the band).
+    // bandHeight = how far the text can travel radially = limits text LENGTH
+    // arcLength = how wide the wedge is tangentially = limits text HEIGHT (font size)
+    // Font: 10px tall, ~6.5px wide per char
+    // So: need arcLength >= 12 (font height with padding) and bandHeight >= char_width * nChars
+
+    if (arcLength < 14) return '';   // wedge too narrow for even 10px font
+    if (bandHeight < 20) return '';  // band too thin for even 3 chars
+
+    // How many chars fit along the band (radial direction)
+    const maxChars = Math.floor((bandHeight - 6) / 6.5);
+    if (maxChars < 3) return '';
+
     const name = d.data.n;
     if (name.length <= maxChars) return name;
-    if (maxChars < 4) return '';
     return name.slice(0, maxChars - 1) + '\u2026';
   }
 
+  function applyLabel(sel) {
+    sel.attr('transform', labelTransform)
+       .text(labelText)
+       .each(function(d) {
+         // After setting text, use textLength to constrain it to arc - padding
+         const angle = d.target.x1 - d.target.x0;
+         const radius = (d.target.y0 + d.target.y1) / 2;
+         const arcLength = angle * radius;
+         const available = arcLength - 8;
+         const txt = this.textContent;
+         if (txt && txt.length > 0) {
+           // Only constrain if text would naturally overflow
+           const naturalWidth = txt.length * 6.0;
+           if (naturalWidth > available) {
+             this.setAttribute('textLength', Math.max(10, available));
+             this.setAttribute('lengthAdjust', 'spacingAndGlyphs');
+           } else {
+             this.removeAttribute('textLength');
+             this.removeAttribute('lengthAdjust');
+           }
+         }
+       });
+  }
+
   if (animate) {
-    labelsMerged.transition(t).style('opacity', 1).attr('transform', labelTransform).text(labelText);
+    labelsMerged.transition(t).style('opacity', 1)
+      .attr('transform', labelTransform)
+      .text(labelText);
+    // Apply textLength after transition (can't do it in transition easily)
+    labelsMerged.on('end', function(d) { applyLabel(d3.select(this)); });
   } else {
-    labelsMerged.style('opacity', 1).attr('transform', labelTransform).text(labelText);
+    labelsMerged.style('opacity', 1);
+    applyLabel(labelsMerged);
   }
 
   if (focus === hierarchyRoot) {
